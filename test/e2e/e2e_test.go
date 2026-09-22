@@ -30,9 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 
 	eventsv1 "k8s.io/api/events/v1"
@@ -59,17 +57,19 @@ const metricsServiceName = "govuk-job-request-operator-controller-manager-metric
 const metricsRoleBindingName = "govuk-job-request-operator-metrics-binding"
 
 // fixtures
-const govukReplatformTestAppDeployment = "govukReplatformTestApp.yaml"
-const jobRequestForSuccessfulJob = "jobRequestForSuccessfulJob.yaml"
-const jobRequestWithAnnotation = "jobRequestWithAnnotation.yaml"
-const jobRequestWithoutAnnotation = "jobRequestWithoutAnnotation.yaml"
-const jobRequestForFailedJob = "jobRequestForFailedJob.yaml"
-const jobRequestForSecondJob = "jobRequestForSecondJob.yaml"
-const jobRequestReviewApproved = "jobRequestReviewApproved.yaml"
-const jobRequestReviewRejected = "jobRequestReviewRejected.yaml"
-const jobRequestReviewRejectedForSecondJob = "jobRequestReviewRejectedForSecondJob.yaml"
-const jobRequestReviewWithAnnotation = "jobRequestReviewWithAnnotation.yaml"
-const jobRequestReviewWithoutAnnotation = "jobRequestReviewWithoutAnnotation.yaml"
+const (
+	govukReplatformTestAppDeployment     = "govukReplatformTestApp.yaml"
+	jobRequestForSuccessfulJob           = "jobRequestForSuccessfulJob.yaml"
+	jobRequestWithAnnotation             = "jobRequestWithAnnotation.yaml"
+	jobRequestWithoutAnnotation          = "jobRequestWithoutAnnotation.yaml"
+	jobRequestForFailedJob               = "jobRequestForFailedJob.yaml"
+	jobRequestForSecondJob               = "jobRequestForSecondJob.yaml"
+	jobRequestReviewApproved             = "jobRequestReviewApproved.yaml"
+	jobRequestReviewRejected             = "jobRequestReviewRejected.yaml"
+	jobRequestReviewRejectedForSecondJob = "jobRequestReviewRejectedForSecondJob.yaml"
+	jobRequestReviewWithAnnotation       = "jobRequestReviewWithAnnotation.yaml"
+	jobRequestReviewWithoutAnnotation    = "jobRequestReviewWithoutAnnotation.yaml"
+)
 
 var _ = Describe("govuk-job-request-operator", Ordered, func() {
 	var controllerPodName string
@@ -237,23 +237,10 @@ var _ = Describe("govuk-job-request-operator", Ordered, func() {
 		})
 
 		It("should ensure the metrics endpoint is serving metrics", func(ctx context.Context) {
-			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			cmd := exec.CommandContext(ctx, "kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=govuk-job-request-operator-metrics-reader",
-				fmt.Sprintf("--serviceaccount=%s:%s", controllerNamespace, serviceAccountName),
-			)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
-
 			By("validating that the metrics service is available")
-			cmd = exec.CommandContext(ctx, "kubectl", "get", "service", metricsServiceName, "-n", controllerNamespace)
-			_, err = utils.Run(cmd)
+			cmd := exec.CommandContext(ctx, "kubectl", "get", "service", metricsServiceName, "-n", controllerNamespace)
+			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
-
-			By("getting the service account token")
-			token, err := serviceAccountToken(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(token).NotTo(BeEmpty())
 
 			By("ensuring the controller pod is ready")
 			verifyControllerPodReady := func(g Gomega) {
@@ -289,7 +276,7 @@ var _ = Describe("govuk-job-request-operator", Ordered, func() {
 							"image": "curlimages/curl:latest",
 							"command": ["/bin/sh", "-c"],
 							"args": [
-								"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
+								"for i in $(seq 1 30); do curl -v http://%s.%s.svc.cluster.local:8080/metrics && exit 0 || sleep 2; done; exit 1"
 							],
 							"securityContext": {
 								"readOnlyRootFilesystem": true,
@@ -306,7 +293,7 @@ var _ = Describe("govuk-job-request-operator", Ordered, func() {
 						}],
 						"serviceAccountName": "%s"
 					}
-				}`, token, metricsServiceName, controllerNamespace, serviceAccountName))
+				}`, metricsServiceName, controllerNamespace, serviceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
 
@@ -467,7 +454,6 @@ var _ = Describe("govuk-job-request-operator", Ordered, func() {
 					g.Expect(output).To(Equal("True"), "govuk-replatform-test-app deployment not ready")
 				}
 				Eventually(ctx, verifyDeploymentInAvailableState).Should(Succeed())
-
 			})
 
 			It("should set the correct JobRequest to Rejected if a JobRequestReview is created to reject it", func(ctx context.Context) {
@@ -1158,62 +1144,12 @@ var _ = Describe("govuk-job-request-operator", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
-
 	})
 })
-
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
-func serviceAccountToken(ctx context.Context) (string, error) {
-	const tokenRequestRawString = `{
-		"apiVersion": "authentication.k8s.io/v1",
-		"kind": "TokenRequest"
-	}`
-
-	By("creating temporary file to store the token request")
-	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
-	tokenRequestFile := filepath.Join("/tmp", secretName)
-	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
-	if err != nil {
-		return "", err
-	}
-
-	var out string
-	verifyTokenCreation := func(g Gomega) {
-		By("executing kubectl command to create the token")
-		cmd := exec.CommandContext(ctx, "kubectl", "create", "--raw", fmt.Sprintf(
-			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
-			controllerNamespace,
-			serviceAccountName,
-		), "-f", tokenRequestFile)
-
-		output, err := cmd.CombinedOutput()
-		g.Expect(err).NotTo(HaveOccurred())
-
-		By("parsing the JSON output to extract the token")
-		var token tokenRequest
-		err = json.Unmarshal(output, &token)
-		g.Expect(err).NotTo(HaveOccurred())
-
-		out = token.Status.Token
-	}
-	Eventually(ctx, verifyTokenCreation).Should(Succeed())
-
-	return out, err
-}
 
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
 func getMetricsOutput(ctx context.Context) (string, error) {
 	By("getting the curl-metrics logs")
 	cmd := exec.CommandContext(ctx, "kubectl", "logs", "curl-metrics", "-n", controllerNamespace)
 	return utils.Run(cmd)
-}
-
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
-type tokenRequest struct {
-	Status struct {
-		Token string `json:"token"`
-	} `json:"status"`
 }
